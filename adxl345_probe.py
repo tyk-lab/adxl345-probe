@@ -10,39 +10,44 @@ REG_INT_SOURCE = 0x30
 DUR_SCALE = 0.000625  # 0.625 msec / LSB
 TAP_SCALE = 0.0625 * adxl345.FREEFALL_ACCEL  # 62.5mg/LSB * Earth gravity in mm/s**2
 
-ADXL345_REST_TIME = .1
+ADXL345_REST_TIME = 0.1
 
 
 class ADXL345Probe:
     def __init__(self, config):
         self.printer = config.get_printer()
-        gcode_macro = self.printer.load_object(config, 'gcode_macro')
-        self.activate_gcode = gcode_macro.load_template(config, 'activate_gcode', '')
-        self.deactivate_gcode = gcode_macro.load_template(config, 'deactivate_gcode', '')
-        int_pin = config.get('int_pin').strip()
+        gcode_macro = self.printer.load_object(config, "gcode_macro")
+        self.activate_gcode = gcode_macro.load_template(config, "activate_gcode", "")
+        self.deactivate_gcode = gcode_macro.load_template(
+            config, "deactivate_gcode", ""
+        )
+        int_pin = config.get("int_pin").strip()
         self.inverted = False
         self.is_measuring = False
-        if int_pin.startswith('!'):
+        if int_pin.startswith("!"):
             self.inverted = True
             int_pin = int_pin[1:].strip()
-        if int_pin != 'int1' and int_pin != 'int2':
-            raise config.error('int_pin must specify one of int1 or int2 pins')
-        probe_pin = config.get('probe_pin')
-        adxl345_name = config.get('chip', 'adxl345')
-        self.int_map = 0x40 if int_pin == 'int2' else 0x0
-        self.tap_thresh = config.getfloat('tap_thresh', 5000, minval=TAP_SCALE, maxval=100000.)
-        self.tap_dur = config.getfloat('tap_dur', 0.01, above=DUR_SCALE, maxval=0.1)
-        self.position_endstop = config.getfloat('z_offset')
-        self.disable_fans = [fan.strip() for fan in config.get("disable_fans", "").split(",") if fan]
+        if int_pin != "int1" and int_pin != "int2":
+            raise config.error("int_pin must specify one of int1 or int2 pins")
+        probe_pin = config.get("probe_pin")
+        adxl345_name = config.get("chip", "adxl345")
+        self.int_map = 0x40 if int_pin == "int2" else 0x0
+        self.tap_thresh = config.getfloat(
+            "tap_thresh", 5000, minval=TAP_SCALE, maxval=100000.0
+        )
+        self.tap_dur = config.getfloat("tap_dur", 0.01, above=DUR_SCALE, maxval=0.1)
+        self.position_endstop = config.getfloat("z_offset")
+        self.disable_fans = [
+            fan.strip() for fan in config.get("disable_fans", "").split(",") if fan
+        ]
 
         self.adxl345 = self.printer.lookup_object(adxl345_name)
-        self.next_cmd_time = self.action_end_time = 0.
+        self.next_cmd_time = self.action_end_time = 0.0
         # Create an "endstop" object to handle the sensor pin
-        ppins = self.printer.lookup_object('pins')
-        pin_params = ppins.lookup_pin(probe_pin, can_invert=True,
-                                      can_pullup=True)
-        mcu = pin_params['chip']
-        self.mcu_endstop = mcu.setup_pin('endstop', pin_params)
+        ppins = self.printer.lookup_object("pins")
+        pin_params = ppins.lookup_pin(probe_pin, can_invert=True, can_pullup=True)
+        mcu = pin_params["chip"]
+        self.mcu_endstop = mcu.setup_pin("endstop", pin_params)
         # Add wrapper methods for endstops
         self.get_mcu = self.mcu_endstop.get_mcu
         self.add_stepper = self.mcu_endstop.add_stepper
@@ -51,14 +56,28 @@ class ADXL345Probe:
         self.home_wait = self.mcu_endstop.home_wait
         self.query_endstop = self.mcu_endstop.query_endstop
         # Register commands and callbacks
-        self.gcode = self.printer.lookup_object('gcode')
-        self.gcode.register_mux_command("SET_ACCEL_PROBE", "CHIP", None, self.cmd_SET_ACCEL_PROBE, desc=self.cmd_SET_ACCEL_PROBE_help)
-        self.printer.register_event_handler('klippy:connect', self.init_adxl)
-        self.printer.register_event_handler('klippy:mcu_identify', self.handle_mcu_identify)
+        self.gcode = self.printer.lookup_object("gcode")
+        self.gcode.register_mux_command(
+            "SET_ACCEL_PROBE",
+            "CHIP",
+            None,
+            self.cmd_SET_ACCEL_PROBE,
+            desc=self.cmd_SET_ACCEL_PROBE_help,
+        )
+        self.printer.register_event_handler("klippy:connect", self.init_adxl)
+        self.printer.register_event_handler(
+            "klippy:mcu_identify", self.handle_mcu_identify
+        )
         self.cmd_helper = probe.ProbeCommandHelper(config, self, self.query_endstop)
         self.probe_offsets = probe.ProbeOffsetsHelper(config)
-        self.probe_session = probe.ProbeSessionHelper(config, self)
-        self.printer.add_object('probe', self)
+        self.param_helper = probe.ProbeParameterHelper(config)
+        self.homing_helper = probe.HomingViaProbeHelper(
+            config, self, self.probe_offsets, self.param_helper
+        )
+        self.probe_session = probe.ProbeSessionHelper(
+            config, self.param_helper, self.homing_helper.start_probe_session
+        )
+        self.printer.add_object("probe", self)
 
     def init_adxl(self):
         chip = self.adxl345
@@ -72,10 +91,10 @@ class ADXL345Probe:
         chip.set_reg(REG_DUR, int(self.tap_dur / DUR_SCALE))
 
     def handle_mcu_identify(self):
-        self.phoming = self.printer.lookup_object('homing')
-        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        self.phoming = self.printer.lookup_object("homing")
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
         for stepper in kin.get_steppers():
-            if stepper.is_active_axis('z'):
+            if stepper.is_active_axis("z"):
                 self.add_stepper(stepper)
 
     def control_fans(self, disable=True):
@@ -103,10 +122,10 @@ class ADXL345Probe:
         return self.position_endstop
 
     def get_probe_params(self, gcmd=None):
-        return self.probe_session.get_probe_params(gcmd)
+        return self.param_helper.get_probe_params(gcmd)
 
-    def get_offsets(self):
-        return self.probe_offsets.get_offsets()
+    def get_offsets(self, gcmd=None):
+        return self.probe_offsets.get_offsets(gcmd)
 
     def get_status(self, eventtime):
         return self.cmd_helper.get_status(eventtime)
@@ -127,7 +146,7 @@ class ADXL345Probe:
     def probe_prepare(self, hmove):
         self.activate_gcode.run_gcode_from_command()
         chip = self.adxl345
-        toolhead = self.printer.lookup_object('toolhead')
+        toolhead = self.printer.lookup_object("toolhead")
         toolhead.flush_step_generation()
         toolhead.dwell(ADXL345_REST_TIME)
         print_time = toolhead.get_last_move_time()
@@ -135,17 +154,19 @@ class ADXL345Probe:
         chip.set_reg(REG_INT_ENABLE, 0x00, minclock=clock)
         chip.read_reg(REG_INT_SOURCE)
         chip.set_reg(REG_INT_ENABLE, 0x40, minclock=clock)
-        self.is_measuring = (chip.read_reg(adxl345.REG_POWER_CTL) == 0x08)
+        self.is_measuring = chip.read_reg(adxl345.REG_POWER_CTL) == 0x08
         if not self.is_measuring:
             chip.set_reg(adxl345.REG_POWER_CTL, 0x08, minclock=clock)
         if not self._try_clear_tap():
-            raise self.printer.command_error("ADXL345 tap triggered before move, it may be set too sensitive.")
+            raise self.printer.command_error(
+                "ADXL345 tap triggered before move, it may be set too sensitive."
+            )
         if not self._in_multi_probe:
             self.control_fans(disable=True)
 
     def probe_finish(self, hmove):
         chip = self.adxl345
-        toolhead = self.printer.lookup_object('toolhead')
+        toolhead = self.printer.lookup_object("toolhead")
         toolhead.dwell(ADXL345_REST_TIME)
         print_time = toolhead.get_last_move_time()
         clock = chip.mcu.print_time_to_clock(print_time)
@@ -154,7 +175,9 @@ class ADXL345Probe:
             chip.set_reg(adxl345.REG_POWER_CTL, 0x00)
         self.deactivate_gcode.run_gcode_from_command()
         if not self._try_clear_tap():
-            raise self.printer.command_error("ADXL345 tap triggered after move, it may be set too sensitive.")
+            raise self.printer.command_error(
+                "ADXL345 tap triggered after move, it may be set too sensitive."
+            )
         if not self._in_multi_probe:
             self.control_fans(disable=False)
 
@@ -162,10 +185,12 @@ class ADXL345Probe:
 
     def cmd_SET_ACCEL_PROBE(self, gcmd):
         chip = self.adxl345
-        self.tap_thresh = gcmd.get_float('TAP_THRESH', self.tap_thresh,
-                                         minval=TAP_SCALE, maxval=100000.)
-        self.tap_dur = gcmd.get_float('TAP_DUR', self.tap_dur,
-                                      above=DUR_SCALE, maxval=0.1)
+        self.tap_thresh = gcmd.get_float(
+            "TAP_THRESH", self.tap_thresh, minval=TAP_SCALE, maxval=100000.0
+        )
+        self.tap_dur = gcmd.get_float(
+            "TAP_DUR", self.tap_dur, above=DUR_SCALE, maxval=0.1
+        )
         chip.set_reg(REG_THRESH_TAP, int(self.tap_thresh / TAP_SCALE))
         chip.set_reg(REG_DUR, int(self.tap_dur / DUR_SCALE))
 
